@@ -39,6 +39,11 @@ g_http_req = (
     b'Host: www.appspot.com\r\n'
     b'Connection: Close\r\n\r\n'
     )
+# Return '302' redirect when the IP provide Google App Engine server.
+g_redirect_str = (
+    b'302 Found\r\n'
+    b'Location: https://console.cloud.google.com/appengine'
+    )
 gws_ciphers = (
     'TLSv1.2:'
     '!ECDHE-RSA-AES128-GCM-SHA256:'
@@ -134,9 +139,13 @@ def google_verify(sock, g23pkp=GoogleG23PKP):
     if pkp not in g23pkp:
         raise OpenSSL.SSL.Error('The intermediate CA is mismatching.')
 
-def get_status_code(sock, http_req=g_http_req):
+#def get_status_code(sock, http_req=g_http_req):
+#    sock.send(http_req)
+#    return sock.read(12)[-3:]
+
+def check_gae_status(sock, http_req=g_http_req, redirect_str=g_redirect_str):
     sock.send(http_req)
-    return sock.read(12)[-3:]
+    return sock.read(72)[-63:] == redirect_str
 
 def get_ip_info(ip,
                 conn_timeout=g_conn_timeout,
@@ -148,7 +157,8 @@ def get_ip_info(ip,
     sock = None
     ssl_sock = None
     #domain = None
-    status_code = None
+    #status_code = None
+    is_gae = None
     try:
         sock = socket.socket()
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -165,7 +175,8 @@ def get_ip_info(ip,
         ssl_sock.settimeout(timeout)
         google_verify(ssl_sock)
         #domain = ssl_sock.get_peer_certificate().get_subject().CN
-        status_code = get_status_code(ssl_sock)
+        #status_code = get_status_code(ssl_sock)
+        is_gae = check_gae_status(ssl_sock)
     except Exception as e:
         #print(e)
         pass
@@ -174,8 +185,7 @@ def get_ip_info(ip,
             ssl_sock.close()
         if sock:
             sock.close()
-    # Get '302' redirect when this IP provide Google App Engine server.
-    return status_code == b'302'
+    return is_gae
 # Scan function end
 
 class GAEScanner(threading.Thread):
