@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sys
@@ -23,11 +23,11 @@ except ImportError:
 # Scan config start
 import os
 dir = os.path.abspath(os.path.dirname(__file__))
-g_infile = 'ip_range_in.txt'
-g_outfile = 'ip_range_out.txt'
-g_infile = os.path.join(dir, g_infile)
+g_outfile = 'ip_out.txt'
+g_skip_ipdb_file = 'directip.db'
 g_outfile = os.path.join(dir, g_outfile)
-g_per_save_num = 10
+g_skip_ipdb_file = os.path.join(dir, g_skip_ipdb_file)
+g_per_save_num = 100
 g_save_interval = 60 * 10
 g_threads = 500
 g_timeout = 4
@@ -84,39 +84,69 @@ g_context.set_cipher_list(gws_ciphers)
 # Scan config end
 
 # Load/Save scan data function start
-import re
+import socket
+import struct
 import threading
 
-get_ip_prefix = re.compile(
-    '^\s*'
-    '('
-    '(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}'
-    ')').search
+class SkipIPv4Database:
+    # Code from:
+    #    https://github.com/SeaHOH/GotoX/blob/master/local/common/region.py
+    # Data builder:
+    #    github.com/SeaHOH/GotoX/blob/master/launcher/buildipdb.py
+    # Data from:
+    #    https://raw.githubusercontent.com/SeaHOH/GotoX/master/data/directip.db
+    # Original data from:
+    #    https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest
+    #    https://github.com/17mon/china_ip_list/raw/master/china_ip_list.txt
+    def __init__(self, filename):
+        with open(filename, 'rb') as f:
+            data_len, = struct.unpack('>L', f.read(4))
+            index = f.read(224 * 4)
+            data = f.read(data_len)
+            if f.read(3) != b'end':
+                raise ValueError("The %s file's data is broken! "
+                                 'Please check or downloads again.'
+                                 % filename)
+            self.update = f.read().decode('ascii')
+        self.index = struct.unpack('>' + 'h' * (224 * 2), index)
+        self.data = struct.unpack('4s' * (data_len // 4), data)
+
+    def __contains__(self, ip, inet_aton=socket.inet_aton):
+        nip = inet_aton(ip)
+        index = self.index
+        fip = nip[0]
+        if fip >= 224:
+            return True
+        fip *= 2
+        lo = index[fip]
+        if lo < 0:
+            return False
+        hi = index[fip + 1]
+        data = self.data
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if data[mid] > nip:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo & 1
+
+g_skip_ipdb = SkipIPv4Database(g_skip_ipdb_file)
+print(g_skip_ipdb.update)
+
 wLock = threading.Lock()
-
-def load_ip_range(file=g_infile):
-    ip_prefix_set = set()
-    with open(file, 'r') as f:
-        for line in f:
-            ip_prefix = get_ip_prefix(line)
-            if ip_prefix:
-                ip_prefix_set.add(ip_prefix.group(1))
-    return ip_prefix_set
-
-def save_ip_range(ip_prefix_list, file=g_outfile):
+def save_ip_list(ip_list, file=g_outfile):
     with wLock:
-        if not ip_prefix_list:
+        if not ip_list:
             return
         with open(file, 'ab') as f:
-            for ip_prefix in ip_prefix_list:
-                f.write(ip_prefix.encode())
-                f.write(b'0/24\n')
+            for ip in ip_list:
+                f.write(ip.encode())
+                f.write(b'\n')
 # Load/Save scan data function end
 
 # Scan function start
 import time
-import socket
-import struct
 from openssl_wrap import SSLConnection
 
 def get_ssl_socket(sock, server_hostname=None, context=g_context):
@@ -178,16 +208,71 @@ def get_ip_info(ip,
     return status_code == b'302'
 # Scan function end
 
+from _functools import reduce
+
+def ip2int(ip):
+    return reduce(lambda a, b: a << 8 | b, map(int, ip.split('.')))
+
+class IPv4Generater:
+    def __init__(self, ip_start=None, ip_end=None,
+                 min_num=g_threads * 2,
+                 max_num=g_threads * 8):
+        self.Lock = threading.Lock()
+        self.ip_pool = set()
+        self.stoped = False
+        if ip_start is None:
+            ip_num = ip2int('1.0.0.0')
+        else:
+            ip_num = ip2int(ip_start)
+        if ip_end is None:
+            ip_stop_num = ip2int('224.0.0.0')
+        else:
+            ip_stop_num = ip2int(ip_end)
+        threading._start_new_thread(self._generate_ips,
+                                    (ip_num, ip_stop_num, min_num, max_num))
+        time.sleep(1)
+
+    def _generate_ips(self, ip_num, ip_stop_num, min_num, max_num,
+                      pack=struct.pack,
+                      inet_ntoa=socket.inet_ntoa,
+                      skip_ipdb=g_skip_ipdb):
+        while True:
+            if len(self.ip_pool) < min_num:        
+                while len(self.ip_pool) < max_num:
+                    for _ in range(100):
+                        if ip_num >= ip_stop_num:
+                            self.stoped = True
+                            break
+                        ip = inet_ntoa(pack('>i', ip_num))
+                        if ip not in skip_ipdb:
+                            self.ip_pool.add(ip)
+                        ip_num += 1
+                    if self.stoped:
+                        break
+            if self.stoped:
+                break
+            time.sleep(0.01)
+
+    def pop(self):
+        with self.Lock:
+            #print(len(self.ip_pool))
+            if self.ip_pool or self.stoped:
+                return self.ip_pool.pop()
+            else:
+                while True:
+                    time.sleep(0.01)
+                    if self.ip_pool:
+                        return self.ip_pool.pop()
+
 class GAEScanner(threading.Thread):
     Lock = threading.Lock()
-    ip_prefix_set = None
-    sub_addr = 0
+    ip_generater = None
 
-    def __init__(self, ip_prefix_set):
+    def __init__(self, ip_generater):
         threading.Thread.__init__(self)
-        if self.ip_prefix_set is None:
-            self.__class__.ip_prefix_set = ip_prefix_set
-            self.__class__.ip_prefix_list = []
+        if self.ip_generater is None:
+            self.__class__.ip_generater = ip_generater
+            self.__class__.ip_list = []
             self.__class__.is_running = True
             self.__class__.threads_num = 0
             self.run = self._save_data_interval
@@ -206,42 +291,35 @@ class GAEScanner(threading.Thread):
             time.sleep(10)
             try:
                 with self.Lock:
-                    num = len(self.ip_prefix_list)
+                    num = len(self.ip_list)
                     now = time.time()
                     is_save = (num >= per_save_num or
                                num and
                                now - last_save_time > save_interval)
                     if is_save:
-                        ip_prefix_list = self.ip_prefix_list
-                        self.__class__.ip_prefix_list = []
+                        ip_list = self.ip_list
+                        self.__class__.ip_list = []
                 if is_save:
-                    save_ip_range(ip_prefix_list)
+                    save_ip_list(ip_list)
                     last_save_time = now
             except Exception:
                 pass
-        self.__class__.ip_prefix_set = None
-        if self.ip_prefix_list:
-            save_ip_range(self.ip_prefix_list)
+        self.__class__.ip_generater = None
+        if self.ip_list:
+            save_ip_list(self.ip_list)
 
     def run(self):
-        try:
-            self.ip_prefix = self.ip_prefix_set.pop()
-        except KeyError:
-            self.stop()
-            return
         while True:
             try:
-                if self.sub_addr > 255:
-                    self.sub_addr = 0
-                    self.ip_prefix = self.ip_prefix_set.pop()
-                ip = '%s%d' % (self.ip_prefix, self.sub_addr)
-                self.sub_addr += 1
+                ip = self.ip_generater.pop()
+                #time.sleep(0.5)
+                #print(ip)
+                #continue
                 is_gae = get_ip_info(ip)
                 if is_gae:
                     with self.Lock:
-                        self.ip_prefix_list.append(self.ip_prefix)
-                    print("%s is ok, left:%d" % (self.ip_prefix, len(self.ip_prefix_set)))
-                    self.sub_addr = 256
+                        self.ip_list.append(ip)
+                    print("%s is ok" % ip)
             except KeyError:
                 self.stop()
                 break
@@ -249,11 +327,11 @@ class GAEScanner(threading.Thread):
                 print('Error occur: %r' % e)
                 continue
 
-def main():
-    ip_prefix_set = load_ip_range()
+def main(ip_start=None, ip_end=None):
+    ip_generater = IPv4Generater(ip_start, ip_end)
     threads_list = []
     for i in range(g_threads + 1):
-        scanner = GAEScanner(ip_prefix_set)
+        scanner = GAEScanner(ip_generater)
         scanner.setDaemon(True)
         #scanner.setName('SCANNER%s' % str(i).rjust(4, '0'))
         scanner.start()
