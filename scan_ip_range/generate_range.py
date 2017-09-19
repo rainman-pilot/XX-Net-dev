@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import os
 import sys
@@ -86,11 +87,11 @@ def splitip(strline):
 
 
 ipfile = "ip_range1.txt"
-tmpfile = "test_tmp.txt"
+tmpfile = "ip_range2.txt"
 iplineslist = []
 ipend = "0/24"
 iptmp = []
-wtmp = []
+wtmp = {}
 
 if os.path.exists(ipfile):
     try:
@@ -130,7 +131,7 @@ if os.path.exists(ipfile):
                     linecnt += 1
         for t in iptmp:
             if t not in wtmp:
-                wtmp.append(t)
+                wtmp[t] = t
                 tmpfd.write(t)
                 tmpfd.write("\n")
                 writelinecnt += 1
